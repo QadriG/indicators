@@ -1,20 +1,20 @@
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import time
 import talib
 import os
 
 # ================== CONFIG ==================
-DAYS_BACK = 500        # ~1.5 years of data
-INTERVAL = "1h"        # 1-hour candles (optimal for daily compounding)
+DAYS_BACK = 500
+INTERVAL = "1h"
 OUTPUT_DIR = "training_data"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ==========================================
 
 def get_top_30_liquid_coins():
-    """Fetch top 30 USDT pairs by volume, excluding BTC/ETH/BNB and stablecoins."""
+    """Fetch top 30 USDT pairs, excluding BTC/ETH/BNB and stablecoins."""
     print("📡 Fetching top 30 liquid coins...")
     url = "https://api.binance.com/api/v3/ticker/24hr"
     data = requests.get(url, timeout=10).json()
@@ -33,7 +33,7 @@ def get_top_30_liquid_coins():
     return [d['symbol'] for d in sorted_pairs[:30]]
 
 def fetch_klines(symbol, days=500, interval="1h"):
-    """Fetch 1-hour klines for 500 days."""
+    """Fetch 1-hour klines."""
     url = "https://api.binance.com/api/v3/klines"
     end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_time = end_time - days * 24 * 60 * 60 * 1000
@@ -65,11 +65,10 @@ def fetch_klines(symbol, days=500, interval="1h"):
     return all_klines
 
 def engineer_features(df):
-    """Generate 28 predictive features."""
+    """Generate 30 predictive features."""
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
     df = df.sort_values('timestamp').reset_index(drop=True)
     
-    # Ensure numeric types
     for col in ['open', 'high', 'low', 'close', 'volume']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     df = df.dropna(subset=['open', 'high', 'low', 'close', 'volume'])
@@ -101,8 +100,9 @@ def engineer_features(df):
     df['obv'] = talib.OBV(close, volume)
     df['volume_ma'] = talib.SMA(volume, timeperiod=20)
     df['volume_ratio'] = volume / df['volume_ma']
+    df['volume_spike'] = (df['volume'] > df['volume_ma'] * 1.5).astype(int)
     
-    # Candlestick (binary)
+    # Candlestick
     df['is_hammer'] = (talib.CDLHAMMER(df['open'], high, low, close) == 100).astype(int)
     df['is_morning_star'] = (talib.CDLMORNINGSTAR(df['open'], high, low, close) == 100).astype(int)
     df['is_bullish_engulfing'] = (talib.CDLENGULFING(df['open'], high, low, close) == 100).astype(int)
@@ -111,42 +111,27 @@ def engineer_features(df):
     df['hour'] = df['timestamp'].dt.hour
     df['is_weekend'] = (df['timestamp'].dt.weekday >= 5).astype(int)
     
-    # Lag features (prevent look-ahead bias)
+    # Lag features
     df['rsi_lag'] = df['rsi'].shift(1)
     df['bb_percent_b_lag'] = df['bb_percent_b'].shift(1)
-    df['close_lag'] = df['close'].shift(1)
+    
+    # NEW: Price acceleration
+    df['price_accel'] = close.diff(3) / close.shift(3)
     
     return df
 
 def create_forward_labels(df, min_rally=2.0, future_window=12):
-    """
-    Label = 1 only if:
-    - Price is oversold (RSI < 35 OR bb_percent_b < 0.2)
-    - Bullish candlestick pattern present
-    - Price rallies >=2% within next 12 hours
-    """
+    """Label = 1 if price rallies >=2% within next 12 hours (no indicator filters)."""
     df = df.sort_values('timestamp').reset_index(drop=True)
     
-    # 1. Look ahead to find max price in next 12 hours
+    # Look ahead 12 hours
     df['future_high'] = df['high'].shift(-future_window).rolling(future_window, min_periods=1).max()
     df['max_rally_pct'] = (df['future_high'] - df['close']) / df['close'] * 100
     
-    # 2. Define reversal conditions
-    rsi_ok = df['rsi_lag'] < 35
-    bb_ok = df['bb_percent_b_lag'] < 0.2
-    candle_ok = (df['is_hammer'] == 1) | (df['is_morning_star'] == 1) | (df['is_bullish_engulfing'] == 1)
+    # Label ANY rally >=2%
+    df['label'] = (df['max_rally_pct'] >= min_rally).astype(int)
     
-    # 3. Only label if ALL conditions are met
-    df['is_reversal_setup'] = rsi_ok | bb_ok  # At least one oversold condition
-    df['has_bullish_candle'] = candle_ok
-    
-    df['label'] = (
-        (df['max_rally_pct'] >= min_rally) &
-        (df['is_reversal_setup']) &
-        (df['has_bullish_candle'])
-    ).astype(int)
-    
-    # 4. Calculate optimal TP only for valid labels
+    # Optimal TP = 75th percentile of rallies
     rally_vals = df[df['label'] == 1]['max_rally_pct']
     if len(rally_vals) > 0:
         optimal_tp = np.percentile(rally_vals, 75)
@@ -154,13 +139,13 @@ def create_forward_labels(df, min_rally=2.0, future_window=12):
     else:
         df['optimal_tp'] = 0.0
     
-    # 5. Return only necessary columns
     return df[[
         'timestamp', 'open', 'high', 'low', 'close', 'volume',
         'ema_9', 'ema_21', 'adx', 'rsi_lag', 'stoch_k', 'stoch_d',
         'macd', 'macd_signal', 'bb_percent_b_lag', 'atr', 'std',
         'obv', 'volume_ratio', 'is_hammer', 'is_morning_star',
-        'is_bullish_engulfing', 'hour', 'is_weekend', 'label', 'optimal_tp'
+        'is_bullish_engulfing', 'hour', 'is_weekend', 'volume_spike',
+        'price_accel', 'label', 'optimal_tp'
     ]]
 
 def main():
@@ -174,7 +159,7 @@ def main():
     for i, symbol in enumerate(coins, 1):
         print(f"[{i}/{len(coins)}] Processing {symbol}...")
         klines = fetch_klines(symbol, DAYS_BACK, INTERVAL)
-        if len(klines) < 1000:  # Need min 1000 hours (~42 days)
+        if len(klines) < 1000:
             continue
             
         df = pd.DataFrame(klines, columns=[
@@ -190,8 +175,6 @@ def main():
         df = create_forward_labels(df)
         df['symbol'] = symbol
         all_data.append(df)
-        
-        # Save per-coin data (for memory efficiency)
         df.to_parquet(f"{OUTPUT_DIR}/{symbol}.parquet", index=False)
     
     if all_data:

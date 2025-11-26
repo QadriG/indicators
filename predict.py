@@ -10,13 +10,14 @@ import os
 # ================== CONFIG ==================
 MODEL_FILE = "crypto_predictor_500d.txt"
 OUTPUT_FILE = "today_predicted_trades.csv"
-MIN_CONFIDENCE = 0.7  # Only show high-confidence signals
+MIN_CONFIDENCE = 0.6  # Lowered for more signals
 
 FEATURE_COLS = [
     'ema_9', 'ema_21', 'adx', 'rsi_lag', 'stoch_k', 'stoch_d',
     'macd', 'macd_signal', 'bb_percent_b_lag', 'atr', 'std',
     'obv', 'volume_ratio', 'is_hammer', 'is_morning_star',
-    'is_bullish_engulfing', 'hour', 'is_weekend'
+    'is_bullish_engulfing', 'hour', 'is_weekend', 'volume_spike',
+    'price_accel'
 ]
 
 STABLECOIN_KEYWORDS = ['USDC', 'FDUSD', 'DAI', 'TUSD', 'BUSD', 'USDP', 'UST', 'EURT']
@@ -35,7 +36,7 @@ def get_top_30_liquid_coins():
     sorted_pairs = sorted(usdt_pairs, key=lambda x: float(x['quoteVolume']), reverse=True)
     return [d['symbol'] for d in sorted_pairs[:30]]
 
-def fetch_klines(symbol, days=3):  # Last 72 hours for feature calculation
+def fetch_klines(symbol, days=3):
     url = "https://api.binance.com/api/v3/klines"
     end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_time = end_time - days * 24 * 60 * 60 * 1000
@@ -50,7 +51,6 @@ def fetch_klines(symbol, days=3):  # Last 72 hours for feature calculation
     return res.json()
 
 def engineer_features_for_prediction(df):
-    """Same features as training, lagged correctly."""
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
     for col in ['open', 'high', 'low', 'close', 'volume']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -83,6 +83,7 @@ def engineer_features_for_prediction(df):
     df['obv'] = talib.OBV(close, volume)
     df['volume_ma'] = talib.SMA(volume, timeperiod=20)
     df['volume_ratio'] = volume / df['volume_ma']
+    df['volume_spike'] = (df['volume'] > df['volume_ma'] * 1.5).astype(int)
     
     # Candlestick
     df['is_hammer'] = (talib.CDLHAMMER(df['open'], high, low, close) == 100).astype(int)
@@ -93,30 +94,27 @@ def engineer_features_for_prediction(df):
     df['hour'] = df['timestamp'].dt.hour
     df['is_weekend'] = (df['timestamp'].dt.weekday >= 5).astype(int)
     
-    # Lag features (use previous hour's values)
+    # Lag features
     df['rsi_lag'] = df['rsi'].shift(1)
     df['bb_percent_b_lag'] = df['bb_percent_b'].shift(1)
     
+    # Price acceleration
+    df['price_accel'] = close.diff(3) / close.shift(3)
+    
     return df
 
-def get_hold_time_stats(symbol):
-    """Get min/max hold time from your historical signals."""
-    # In real use, load from full_dataset or precomputed stats
-    # For now, return realistic defaults based on your data
-    base_min = 20
-    base_max = 120
-    return base_min, base_max
+def get_hold_time_stats():
+    # Estimate from historical data (you can refine this)
+    return 20, 120
 
 def main():
     print("🔮 PREDICTING TODAY'S TRADE SIGNALS")
     
-    # Load model
     if not os.path.exists(MODEL_FILE):
         print(f"❌ Model not found: {MODEL_FILE}")
         return
     model = joblib.load(MODEL_FILE)
     
-    # Get coins
     coins = get_top_30_liquid_coins()
     signals = []
     now = datetime.now(timezone.utc)
@@ -136,31 +134,18 @@ def main():
             if df.empty or len(df) < 2:
                 continue
                 
-            # Use the latest complete candle (not the current incomplete one)
+            # Use latest complete candle
             latest = df.iloc[-2]
             X = pd.DataFrame([{col: latest[col] for col in FEATURE_COLS}])
             X = X.fillna(0)
             
             prob = model.predict_proba(X)[0][1]
-            
-            # ===== DEBUG: PRINT WHY NO SIGNAL =====
-            print(f"[DEBUG] {symbol} | Conf: {prob:.3f} | RSI: {latest['rsi_lag']:.1f} | "
-                  f"BB%: {latest['bb_percent_b_lag']:.2f} | "
-                  f"Hammer: {latest['is_hammer']} | "
-                  f"MorningStar: {latest['is_morning_star']}")
-            # =====================================
-            
             if prob >= MIN_CONFIDENCE:
-                # Entry price: 2% below recent high (last 12 hours)
-                recent_high = df['high'].tail(12).max()
-                entry_price = recent_high * 0.98
-                
-                # Optimal TP (scale confidence to realistic TP)
+                # Entry price = current close (model decides if it's good)
+                entry_price = latest['close']
                 optimal_tp_pct = np.clip(prob * 8, 2.0, 12.0)
                 exit_price = entry_price * (1 + optimal_tp_pct / 100)
-                
-                # Hold time (min/max)
-                min_hold, max_hold = get_hold_time_stats(symbol)
+                min_hold, max_hold = get_hold_time_stats()
                 
                 signals.append({
                     'symbol': symbol,
@@ -183,7 +168,7 @@ def main():
         print("\n🎯 TODAY'S PREDICTED TRADES:")
         print(df_signals.to_string(index=False))
     else:
-        print("\n⚠️ No high-confidence signals for today.")
+        print("\n⚠️ No signals. Try lowering MIN_CONFIDENCE.")
 
 if __name__ == "__main__":
     main()
