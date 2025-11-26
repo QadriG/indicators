@@ -9,7 +9,7 @@ import os
 # ================== CONFIG ==================
 DAYS_BACK = 500
 INTERVAL = "1h"
-OUTPUT_DIR = "training_data_v2"
+OUTPUT_DIR = "training_data_v3"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ==========================================
 
@@ -120,11 +120,11 @@ def engineer_features(df):
     
     return df
 
-def create_forward_labels(df, min_rally=2.0, future_window=12):
+def create_forward_labels(df, min_rally=2.5, future_window=12):
     """
-    Label = 1 if:
-    - Price rallies >=2% within next 12 hours
-    - Rally lasts >=3 candles (15 min)
+    Label = 1 ONLY IF:
+    - Price rallies ≥2.5% within next 12 hours (actionable profit)
+    - Rally lasts ≥6 candles (30+ minutes)
     - Volume spike occurs during rally
     """
     df = df.sort_values('timestamp').reset_index(drop=True)
@@ -133,25 +133,24 @@ def create_forward_labels(df, min_rally=2.0, future_window=12):
     df['future_high'] = df['high'].shift(-future_window).rolling(future_window, min_periods=1).max()
     df['max_rally_pct'] = (df['future_high'] - df['close']) / df['close'] * 100
     
-    # Rally duration (how many candles hit near future_high)
-    df['rally_duration'] = (
-        (df['high'].shift(-1) >= df['future_high'] * 0.99) |
-        (df['high'].shift(-2) >= df['future_high'] * 0.99) |
-        (df['high'].shift(-3) >= df['future_high'] * 0.99)
-    ).astype(int) * 3  # At least 3 candles = 15 min
+    # Rally duration: how many of next 6 candles stay near high
+    rally_candles = 0
+    for i in range(1, 7):
+        rally_candles += (df['high'].shift(-i) >= df['future_high'] * 0.95).astype(int)
+    df['rally_duration'] = rally_candles
     
     # Volume spike in next 12 hours
     df['future_volume_spike'] = df['volume_spike'].shift(-1).rolling(future_window, min_periods=1).max()
     
-    # Label with all filters
+    # STRICT labeling
     df['label'] = (
-        (df['max_rally_pct'] >= min_rally) &
-        (df['max_rally_pct'] <= 20.0) &        # Exclude pump-and-dumps
-        (df['rally_duration'] >= 3) &          # Sustained rally
-        (df['future_volume_spike'] == 1)       # Volume confirmation
+        (df['max_rally_pct'] >= min_rally) &      # ≥2.5% profit
+        (df['max_rally_pct'] <= 25.0) &          # ≤25% (exclude pumps)
+        (df['rally_duration'] >= 6) &             # lasts 30+ min
+        (df['future_volume_spike'] == 1)          # volume confirmation
     ).astype(int)
     
-    # Optimal TP = 75th percentile of valid rallies
+    # Optimal TP = 75th percentile of VALID rallies
     rally_vals = df[df['label'] == 1]['max_rally_pct']
     if len(rally_vals) > 0:
         optimal_tp = np.percentile(rally_vals, 75)
@@ -169,7 +168,7 @@ def create_forward_labels(df, min_rally=2.0, future_window=12):
     ]]
 
 def main():
-    print("🚀 BUILDING 500-DAY CRYPTO TRAINING DATASET (V2)")
+    print("🚀 BUILDING 500-DAY CRYPTO TRAINING DATASET (V3 - ACTIONABLE SIGNALS)")
     print("Coins: Top 30 liquid (excl. BTC/ETH/BNB/stablecoins)")
     print("Timeframe: 1-hour candles | Lookback: 500 days\n")
     
@@ -202,7 +201,7 @@ def main():
         full_df.to_parquet(f"{OUTPUT_DIR}/full_dataset.parquet", index=False)
         print(f"\n✅ Full dataset saved: {len(full_df)} samples")
         print(f"✅ Positive labels: {full_df['label'].sum()} ({full_df['label'].mean()*100:.1f}%)")
-        print("Expected: 15–25% positive rate with higher-quality signals")
+        print("🎯 Expected: 5–10% positive rate, avg TP ≥ 3.5%, precision ≥ 70%")
     else:
         print("❌ No data collected.")
 

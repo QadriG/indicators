@@ -1,0 +1,3 @@
+symbol,prediction_time,predicted_entry_price,optimal_tp_pct,predicted_exit_price,min_hold_minutes,max_hold_minutes,confidence
+NEARUSDT,2025-11-26 16:50:58,1.86,4.06,1.935577,78.38749485808309,240,0.77
+JTOUSDT,2025-11-26 16:51:00,0.537,4.49,0.561091,78.93520140105079,240,0.85
