@@ -8,8 +8,9 @@ import joblib
 warnings.filterwarnings('ignore')
 
 # ================== CONFIG ==================
-DATA_DIR = "training_data"
-OUTPUT_MODEL = "crypto_predictor_500d.txt"
+# ================== CONFIG ==================
+DATA_DIR = "training_data"          # ← FIXED
+OUTPUT_MODEL = "crypto_predictor_500d_v2.pkl"  # ← Better naming
 FEATURE_COLS = [
     'ema_9', 'ema_21', 'adx', 'rsi_lag', 'stoch_k', 'stoch_d',
     'macd', 'macd_signal', 'bb_percent_b_lag', 'atr', 'std',
@@ -17,6 +18,7 @@ FEATURE_COLS = [
     'is_bullish_engulfing', 'hour', 'is_weekend', 'volume_spike',
     'price_accel'
 ]
+# ==========================================
 # ==========================================
 
 def load_full_dataset():
