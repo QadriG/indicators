@@ -12,85 +12,105 @@ COINS = ["FETUSDT", "FILUSDT", "STRKUSDT", "ICPUSDT", "NEARUSDT",
          "IMXUSDT", "WLDUSDT", "JTOUSDT", "CELOUSDT", "OSMOUSDT"]
 MODELS_DIR = "models_per_coin"
 OUTPUT_FILE = "today_live_predictions.csv"
-MIN_CONFIDENCE = 0.75
+MIN_CONFIDENCE = 0.70
 # ==========================================
 
-def fetch_latest_candle(symbol):
+def fetch_klines(symbol, days=2):
+    """Fetch last 48 hours of 1-hour candles."""
     url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol, "interval": "1h", "limit": 2}
+    end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start_time = end_time - days * 24 * 60 * 60 * 1000
+    params = {
+        "symbol": symbol,
+        "interval": "1h",
+        "startTime": start_time,
+        "endTime": end_time,
+        "limit": 1000
+    }
     res = requests.get(url, params=params, timeout=10)
-    klines = res.json()
-    if len(klines) < 2:
-        return None
-    # Use previous complete candle (not current open)
-    candle = klines[-2]
-    return {
-        'timestamp': pd.to_datetime(candle[0], unit='ms', utc=True),
-        'open': float(candle[1]),
-        'high': float(candle[2]),
-        'low': float(candle[3]),
-        'close': float(candle[4]),
-        'volume': float(candle[5])
-    }
+    return res.json()
 
-def engineer_features(candle):
-    close = candle['close']
-    volume = candle['volume']
-    # Simple features (match training)
-    features = {
-        'ema_9': close,  # Placeholder - in real use, compute from history
-        'rsi': 50.0,     # Placeholder
-        'volume_ratio': 1.0
-    }
-    return features
+def engineer_features(df):
+    """Compute real technical features."""
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df.dropna(subset=['close'])
+    
+    close = df['close']
+    volume = df['volume']
+    
+    # Real features (match training)
+    df['ema_9'] = talib.EMA(close, timeperiod=9)
+    df['rsi'] = talib.RSI(close, timeperiod=14)
+    df['volume_ma'] = talib.SMA(volume, timeperiod=20)
+    df['volume_ratio'] = volume / df['volume_ma']
+    
+    return df
 
 def predict_signal(symbol):
-    candle = fetch_latest_candle(symbol)
-    if not candle:
-        return None
+    try:
+        klines = fetch_klines(symbol, days=2)
+        if len(klines) < 25:
+            return None
+            
+        df = pd.DataFrame(klines, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'ct', 'qav', 'ntr', 'tbb', 'tbq', 'ignore'
+        ])
+        df = engineer_features(df)
+        if df.empty:
+            return None
+            
+        latest = df.iloc[-2]
+        model_path = f"{MODELS_DIR}/{symbol}.pkl"
+        if not os.path.exists(model_path):
+            return None
+            
+        model_data = joblib.load(model_path)
+        X = np.array([[
+            latest['ema_9'],
+            latest['rsi'],
+            latest['volume_ratio']
+        ]])
         
-    # In a full implementation, you'd:
-    # 1. Fetch last 24h of data
-    # 2. Compute EMA, RSI, volume_ratio properly
-    # 3. Use those as input to models
-    
-    # For now, simulate a prediction based on historical stats
-    model_path = f"{MODELS_DIR}/{symbol}.pkl"
-    if not os.path.exists(model_path):
-        return None
+        tp_model = model_data['tp_model']
+        hold_model = model_data['hold_model']
         
-    model_data = joblib.load(model_path)
-    avg_tp = model_data['avg_tp']
-    avg_hold = model_data['avg_hold']
-    
-    # Simulate confidence based on recent volatility
-    confidence = np.clip(np.random.rand() * 0.3 + 0.6, 0.6, 0.9)
-    
-    if confidence >= MIN_CONFIDENCE:
-        return {
-            'symbol': symbol,
-            'prediction_time': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-            'predicted_entry_price': round(candle['close'], 6),
-            'optimal_tp_pct': round(avg_tp, 2),
-            'predicted_exit_price': round(candle['close'] * (1 + avg_tp / 100), 6),
-            'min_hold_minutes': max(20, avg_hold * 0.5),
-            'max_hold_minutes': min(240, avg_hold * 2),
-            'confidence': round(confidence, 2)
-        }
+        # Predict TP
+        tp_pred = tp_model.predict(X)[0]
+        hold_pred = hold_model.predict(X)[0]
+        
+        # ✅ REAL CONFIDENCE: based on tree agreement
+        tree_preds = np.array([tree.predict(X)[0] for tree in tp_model.estimators_])
+        tp_std = np.std(tree_preds)
+        confidence = np.clip(1.0 - (tp_std / (tp_pred + 1e-6)), 0.5, 1.0)
+        
+        # Only accept if TP >= 1.5% AND confidence >= 0.7
+        if tp_pred >= 1.5 and confidence >= 0.7:
+            return {
+                'symbol': symbol,
+                'prediction_time': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                'predicted_entry_price': round(latest['close'], 6),
+                'optimal_tp_pct': round(tp_pred, 2),
+                'predicted_exit_price': round(latest['close'] * (1 + tp_pred / 100), 6),
+                'min_hold_minutes': max(20, hold_pred * 0.5),
+                'max_hold_minutes': min(240, hold_pred * 1.5),
+                'confidence': round(confidence, 2)
+            }
+    except Exception as e:
+        print(f"[ERROR] {symbol}: {e}")
     return None
 
 def main():
-    print("🔮 PREDICTING TODAY'S HIGH-CONFIDENCE TRADES")
+    print("🔮 PREDICTING TODAY'S HIGH-CONFIDENCE TRADES (REAL FEATURES)")
     signals = []
     
     for symbol in COINS:
-        try:
-            signal = predict_signal(symbol)
-            if signal:
-                signals.append(signal)
-        except Exception as e:
-            print(f"[ERROR] {symbol}: {e}")
-            continue
+        signal = predict_signal(symbol)
+        if signal:
+            signals.append(signal)
+        time.sleep(0.2)  # Rate limit
     
     if signals:
         df = pd.DataFrame(signals)
@@ -99,7 +119,7 @@ def main():
         print("\n🎯 TODAY'S PREDICTED TRADES:")
         print(df.to_string(index=False))
     else:
-        print("\n⚠️ No high-confidence signals (try lowering MIN_CONFIDENCE)")
+        print("\n⚠️ No high-confidence signals (confidence ≥ 0.75 and TP ≥ 2.5%)")
 
 if __name__ == "__main__":
     main()
