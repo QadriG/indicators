@@ -12,7 +12,7 @@ def create_sequences(X, time_steps=60):
         Xs.append(X[i:i+time_steps])
     return np.array(Xs)
 
-top10_coins = ["PEPE", "DOGE", "SHIB", "BONK", "LUNC", "STRK", "SOON", "ULTIMA", "ATH", "RON"]
+top10_coins = ["PEPE", "DOGE", "SHIB", "BONK", "LUNC", "STRK", "ZEC", "HYPER", "FLOKI", "WLD"]
 
 for coin in top10_coins:
     csv_path = f"data/{coin}_data.csv"

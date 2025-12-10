@@ -8,7 +8,7 @@ import pandas as pd
 models_dir = 'data/models/top10'
 results = []
 
-top10_coins = ["PEPE", "DOGE", "SHIB", "BONK", "LUNC", "STRK", "SOON", "ULTIMA", "ATH", "RON"]
+top10_coins = ["PEPE", "DOGE", "SHIB", "BONK", "LUNC", "STRK", "ZEC", "HYPER", "FLOKI", "WLD"]
 
 for coin in top10_coins:
     npz_path = f"data/processed/{coin}_processed.npz"
